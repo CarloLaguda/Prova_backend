@@ -550,11 +550,11 @@ def cambia_password(user_id):
 
 
 # ── Aggiornamento profilo ────────────────────────────────────────────────────
+# ── Aggiornamento profilo ────────────────────────────────────────────────────
 @app.route("/utente/<int:user_id>", methods=["PUT"])
 @token_richiesto()
 def aggiorna_utente(user_id):
     """Aggiorna i dati anagrafici dell'utente (esclusa password)."""
-    # 'sub' nel token è una stringa: convertito a int per il confronto con user_id.
     if int(request.jwt_payload["sub"]) != user_id:
         return jsonify({"error": "Non puoi modificare il profilo di un altro utente"}), 403
 
@@ -581,14 +581,18 @@ def aggiorna_utente(user_id):
         conn   = get_mysql_connection()
         cursor = conn.cursor(dictionary=True)
 
+        # Verifica esistenza utente PRIMA dell'update
+        cursor.execute("SELECT id FROM Utente WHERE id = %s", (user_id,))
+        if not cursor.fetchone():
+            return jsonify({"error": "Utente non trovato"}), 404
+
         set_clause = ", ".join([f"{col} = %s" for col in payload_utente.keys()])
         values     = list(payload_utente.values()) + [user_id]
         cursor.execute(f"UPDATE Utente SET {set_clause} WHERE id = %s", values)
-
-        if cursor.rowcount == 0:
-            return jsonify({"error": "Utente non trovato"}), 404
-
         conn.commit()
+
+        # rowcount NON usato: MySQL lo mette a 0 se il valore non cambia,
+        # anche se la riga esiste (comportamento default senza FOUND_ROWS).
 
         cursor.execute(
             "SELECT id, nome, cognome, email, telefono, ruolo FROM Utente WHERE id = %s",
@@ -604,7 +608,6 @@ def aggiorna_utente(user_id):
     finally:
         if conn:
             conn.close()
-
 
 # ── Profilo automobilista ────────────────────────────────────────────────────
 @app.route("/automobilista/<int:user_id>/profilo", methods=["GET"])
