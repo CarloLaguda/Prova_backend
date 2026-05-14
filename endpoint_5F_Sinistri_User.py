@@ -11,7 +11,7 @@ Collezioni MongoDB (nuovo server):
   Soccorso            — richieste soccorso (mirror di MySQL)
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 from pymongo import MongoClient, DESCENDING
 from bson import ObjectId
@@ -39,7 +39,44 @@ except Exception as _e:
     _STORAGE_DISPONIBILE = False
 
 app = Flask(__name__)
-CORS(app)
+
+# ─────────────────────────────────────────────
+#  CORS — configurazione esplicita per Codespaces
+#  flask-cors gestisce il preflight OPTIONS e
+#  aggiunge gli header su ogni risposta.
+# ─────────────────────────────────────────────
+
+CORS(
+    app,
+    resources={r"/*": {"origins": "*"}},
+    allow_headers=["Content-Type", "Authorization", "Accept", "X-Requested-With"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    supports_credentials=False,
+    max_age=600,
+)
+
+
+# Fallback: intercetta ogni OPTIONS e restituisce 200 anche se flask-cors
+# non lo cattura (può succedere su alcuni reverse-proxy di Codespaces).
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        resp = make_response("", 200)
+        resp.headers["Access-Control-Allow-Origin"]  = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept, X-Requested-With"
+        resp.headers["Access-Control-Max-Age"]       = "600"
+        return resp
+
+
+# Aggiunge gli header CORS su ogni risposta (doppio livello di sicurezza).
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"]  = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, Accept, X-Requested-With"
+    return response
+
 
 # ─────────────────────────────────────────────
 #  CONFIGURAZIONE MYSQL
@@ -124,20 +161,17 @@ def _richiedi_mongo():
 def _serializza_sinistro(s: dict) -> dict:
     """Serializza un documento Proto_Sinistro_SC aggiungendo alias per compatibilità frontend."""
     s["_id"] = str(s["_id"])
-    # Alias campi rinominati → vecchi nomi ancora usati dal frontend
     if "data_sinistro" in s:
         if isinstance(s["data_sinistro"], datetime):
             s["data_sinistro"] = s["data_sinistro"].isoformat()
-        s["data_evento"] = s["data_sinistro"]          # alias retrocompatibilità
+        s["data_evento"] = s["data_sinistro"]
     if "descrizione_danno" in s:
-        s["descrizione"] = s["descrizione_danno"]       # alias retrocompatibilità
+        s["descrizione"] = s["descrizione_danno"]
     if "stato_sinistro" in s:
-        s["stato"] = s["stato_sinistro"]                # alias retrocompatibilità
-    # Altri campi datetime
+        s["stato"] = s["stato_sinistro"]
     for campo in ("data_inserimento", "data_aggiornamento", "data_assegnazione"):
         if isinstance(s.get(campo), datetime):
             s[campo] = s[campo].isoformat()
-    # Analisi AI
     analisi = s.get("analisi_ai")
     if analisi and isinstance(analisi.get("data_analisi"), datetime):
         analisi["data_analisi"] = analisi["data_analisi"].isoformat()
@@ -233,7 +267,6 @@ def apri_sinistro():
         return err
 
     data = request.json
-    # Accetta sia vecchi nomi (data_evento/descrizione) che nuovi (data_sinistro/descrizione_danno)
     required = ["automobilista_id", "targa"]
     if not any(k in data for k in ("data_evento", "data_sinistro")):
         return jsonify({"error": "Campo obbligatorio mancante: data_evento o data_sinistro"}), 400
@@ -257,7 +290,6 @@ def apri_sinistro():
         except (TypeError, ValueError):
             return jsonify({"error": "Dati di geolocalizzazione non validi"}), 400
 
-    # Accetta entrambi i nomi per la data
     data_raw = data.get("data_sinistro") or data.get("data_evento")
     try:
         data_sinistro_dt = datetime.fromisoformat(data_raw).replace(tzinfo=UTC)
@@ -268,22 +300,21 @@ def apri_sinistro():
 
     try:
         nuovo_sinistro = {
-            # — Campi principali schema Proto_Sinistro_SC —
-            "automobilista_id":    data["automobilista_id"],
-            "targa":               data["targa"],
-            "modello_veicolo":     data.get("modello_veicolo", ""),
-            "data_sinistro":       data_sinistro_dt,
-            "descrizione_danno":   descrizione_danno,
-            "stato_sinistro":      "APERTO",
-            "attivo":              True,
-            "priorita":            data.get("priorita", "normale"),
-            "officina_id":         data.get("officina_id"),
+            "automobilista_id":       data["automobilista_id"],
+            "targa":                  data["targa"],
+            "modello_veicolo":        data.get("modello_veicolo", ""),
+            "data_sinistro":          data_sinistro_dt,
+            "descrizione_danno":      descrizione_danno,
+            "stato_sinistro":         "APERTO",
+            "attivo":                 True,
+            "priorita":               data.get("priorita", "normale"),
+            "officina_id":            data.get("officina_id"),
             "compagnia_assicurativa": data.get("compagnia_assicurativa", ""),
-            "numero_sinistro":     data.get("numero_sinistro", ""),
-            "telaio":              data.get("telaio", ""),
-            "cliente":             data.get("cliente", ""),
-            "note":                data.get("note", ""),
-            "contatto_cliente":    data.get("contatto_cliente", {}),
+            "numero_sinistro":        data.get("numero_sinistro", ""),
+            "telaio":                 data.get("telaio", ""),
+            "cliente":                data.get("cliente", ""),
+            "note":                   data.get("note", ""),
+            "contatto_cliente":       data.get("contatto_cliente", {}),
             "preventivo": {
                 "data":            None,
                 "costo_totale":    None,
@@ -293,10 +324,9 @@ def apri_sinistro():
                 "dettaglio_voci":  [],
                 "fattura":         None
             },
-            # — Campi interni —
-            "data_inserimento":    datetime.now(UTC),
-            "immagini":            [],
-            "analisi_ai":          None,
+            "data_inserimento": datetime.now(UTC),
+            "immagini":         [],
+            "analisi_ai":       None,
         }
         if posizione is not None:
             nuovo_sinistro["geolocalizzazione"] = posizione
@@ -321,7 +351,6 @@ def aggiorna_sinistro(sinistro_id):
 
     update_fields = {"data_aggiornamento": datetime.now(UTC)}
 
-    # Gestisci entrambi i nomi per retrocompatibilità
     if "descrizione_danno" in data:
         update_fields["descrizione_danno"] = data["descrizione_danno"]
     elif "descrizione" in data:
@@ -505,16 +534,18 @@ def get_analisi_ai(sinistro_id):
 
 @app.route("/soccorso", methods=["POST"])
 def crea_richiesta_soccorso():
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "Body JSON mancante o malformato"}), 400
 
-    targa            = data.get("targa")
-    id_sinistro      = data.get("id_sinistro")
-    id_officina      = data.get("id_officina")
-    lat              = data.get("lat")
-    lon              = data.get("lon")
-    via              = data.get("via")
-    orario_arrivo    = data.get("orario_arrivo")
-    durata_soccorso  = data.get("durata_soccorso")
+    targa           = data.get("targa")
+    id_sinistro     = data.get("id_sinistro")
+    id_officina     = data.get("id_officina")
+    lat             = data.get("lat")
+    lon             = data.get("lon")
+    via             = data.get("via")
+    orario_arrivo   = data.get("orario_arrivo")
+    durata_soccorso = data.get("durata_soccorso")
 
     if not targa:
         return jsonify({"error": "Targa obbligatoria"}), 400
@@ -524,6 +555,7 @@ def crea_richiesta_soccorso():
         conn   = get_mysql()
         cursor = conn.cursor(dictionary=True)
 
+        # 1. Recuperiamo i dati del veicolo e dell'automobilista tramite la targa
         cursor.execute("""
             SELECT v.id AS veicolo_id, a.id AS automobilista_id
             FROM Veicolo v
@@ -533,8 +565,14 @@ def crea_richiesta_soccorso():
 
         veicolo = cursor.fetchone()
         if veicolo is None:
-            return jsonify({"error": "Veicolo non trovato"}), 404
+            return jsonify({"error": f"Veicolo con targa '{targa}' non trovato"}), 404
 
+        now_utc = datetime.now(timezone.utc)
+
+        # 2. INSERIMENTO SU MYSQL
+        # IMPORTANTE: id_veicolo_soccorso è impostato a None (NULL) perché al momento della 
+        # richiesta il carroattrezzi non è ancora stato assegnato. Passare l'ID del veicolo
+        # privato qui causava l'errore 1452 di integrità referenziale.
         cursor.execute("""
             INSERT INTO Richiesta_Soccorso
             (id_sinistro, id_automobilista, id_officina, id_veicolo_soccorso,
@@ -544,22 +582,26 @@ def crea_richiesta_soccorso():
             id_sinistro,
             veicolo["automobilista_id"],
             id_officina,
-            veicolo["veicolo_id"],
-            datetime.now(timezone.utc),
+            None,  # Risolto: rimosso veicolo["veicolo_id"] che causava il crash
+            now_utc,
             orario_arrivo,
             durata_soccorso,
-            "in_attesa"
+            "in_attesa",
         ))
 
         richiesta_id = cursor.lastrowid
         conn.commit()
 
+        # Gestione posizione per MongoDB
         posizione = None
         if lat is not None and lon is not None:
             posizione = {"tipo": "gps", "lat": lat, "lon": lon}
         elif via:
             posizione = {"tipo": "indirizzo", "via": via}
 
+        # 3. INSERIMENTO SU MONGODB
+        # Qui manteniamo l'ID del veicolo dell'utente (veicolo["veicolo_id"]) perché 
+        # è utile per lo storico e non ha vincoli di foreign key.
         mongo_id = None
         if _MONGO_DISPONIBILE and soccorso_col is not None:
             res = soccorso_col.insert_one({
@@ -567,13 +609,13 @@ def crea_richiesta_soccorso():
                 "id_sinistro":        id_sinistro,
                 "id_automobilista":   veicolo["automobilista_id"],
                 "id_officina":        id_officina,
-                "id_veicolo":         veicolo["veicolo_id"],
+                "id_veicolo_utente":  veicolo["veicolo_id"], # Chiave rinominata per chiarezza
                 "targa":              targa,
                 "posizione":          posizione,
                 "orario_arrivo":      orario_arrivo,
                 "durata_soccorso":    durata_soccorso,
                 "stato":              "in_attesa",
-                "data_richiesta":     datetime.now(timezone.utc)
+                "data_richiesta":     now_utc,
             })
             mongo_id = str(res.inserted_id)
 
@@ -584,22 +626,22 @@ def crea_richiesta_soccorso():
             "id_sinistro":      id_sinistro,
             "id_automobilista": veicolo["automobilista_id"],
             "id_officina":      id_officina,
-            "id_veicolo":       veicolo["veicolo_id"],
+            "id_veicolo_utente":veicolo["veicolo_id"],
             "posizione":        posizione,
             "orario_arrivo":    orario_arrivo,
             "durata_soccorso":  durata_soccorso,
             "stato":            "in_attesa",
-            "message":          "Richiesta di soccorso inviata con successo"
+            "message":          "Richiesta di soccorso inviata con successo",
         }), 201
 
     except Exception as e:
         if conn:
             conn.rollback()
+        print(f"❌ [soccorso] Errore: {e}")
         return jsonify({"error": str(e)}), 500
     finally:
         if conn:
             conn.close()
-
 
 @app.route("/soccorso/utente/<int:automobilista_id>", methods=["GET"])
 def get_soccorsi_utente(automobilista_id):
@@ -621,6 +663,7 @@ def get_soccorsi_utente(automobilista_id):
                 r["data_richiesta"] = r["data_richiesta"].isoformat()
         return jsonify(richieste), 200
     except Exception as e:
+        print(f"❌ [soccorso/utente] Errore: {e}")
         return jsonify({"error": str(e)}), 500
     finally:
         if conn:
@@ -679,7 +722,7 @@ def crea_veicolo_utente(user_id):
             "status":           "success",
             "message":          "Veicolo creato con successo",
             "veicolo_id":       cursor.lastrowid,
-            "automobilista_id": automobilista_id
+            "automobilista_id": automobilista_id,
         }), 201
 
     except mysql.connector.IntegrityError:

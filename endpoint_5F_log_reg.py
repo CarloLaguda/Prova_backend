@@ -12,7 +12,18 @@ import bcrypt
 from functools import wraps
 
 app = Flask(__name__)
-CORS(app)
+
+# ── CORS ─────────────────────────────────────────────────────────────────────
+# Configurazione esplicita: necessaria perché il frontend gira su
+# http://localhost:4200 mentre il backend è su un tunnel Codespaces
+# (origin diversi → ogni richiesta con header Authorization scatena
+# un preflight OPTIONS che deve essere gestito correttamente).
+CORS(
+    app,
+    resources={r"/*": {"origins": "*"}},
+    allow_headers=["Content-Type", "Authorization"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+)
 
 # ── Configurazione ───────────────────────────────────────────────────────────
 load_dotenv()
@@ -83,7 +94,7 @@ def verifica_password(plain: str, hashed: str) -> bool:
             return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
         except ValueError:
             return False
-            
+
     # 2. Fallback: confronto in chiaro (per le vecchie password)
     # Suggerimento: appena l'utente fa login, dovresti aggiornare il suo hash!
     return plain == hashed
@@ -94,9 +105,9 @@ def _now_utc() -> datetime:
 
 
 def genera_access_token(user_id: int, ruolo: str) -> str:
-    """JWT di breve durata (1 h) per autenticare le richieste API."""
+    # NB: 'sub' DEVE essere una stringa — PyJWT lo valida in fase di decodifica.
     payload = {
-        "sub":   user_id,
+        "sub":   str(user_id),
         "ruolo": ruolo,
         "type":  "access",
         "iat":   _now_utc(),
@@ -106,9 +117,9 @@ def genera_access_token(user_id: int, ruolo: str) -> str:
 
 
 def genera_refresh_token(user_id: int, ruolo: str) -> str:
-    """JWT di lunga durata (30 gg) per ottenere nuovi access token."""
+    # NB: 'sub' DEVE essere una stringa — PyJWT lo valida in fase di decodifica.
     payload = {
-        "sub":   user_id,
+        "sub":   str(user_id),
         "ruolo": ruolo,
         "type":  "refresh",
         "iat":   _now_utc(),
@@ -150,6 +161,12 @@ def token_richiesto(ruoli_ammessi=None, tipo="access"):
     def decorator(f):
         @wraps(f)
         def wrapper(*args, **kwargs):
+            # I preflight CORS (OPTIONS) non portano l'header Authorization:
+            # vanno lasciati passare senza autenticazione, altrimenti il
+            # browser riceve 401 sul preflight e blocca la richiesta vera.
+            if request.method == "OPTIONS":
+                return ("", 204)
+
             auth_header = request.headers.get("Authorization", "")
             if not auth_header.startswith("Bearer "):
                 return jsonify({"error": "Token mancante o formato non valido"}), 401
@@ -417,8 +434,10 @@ def refresh_token():
     # Token rotation: revoca il refresh token usato
     _revoca_token(old_token, payload["exp"])
 
-    new_access  = genera_access_token(payload["sub"], payload["ruolo"])
-    new_refresh = genera_refresh_token(payload["sub"], payload["ruolo"])
+    # 'sub' nel payload è una stringa: riconvertito a int per le funzioni di generazione.
+    user_id = int(payload["sub"])
+    new_access  = genera_access_token(user_id, payload["ruolo"])
+    new_refresh = genera_refresh_token(user_id, payload["ruolo"])
 
     return jsonify({
         "status":        "success",
@@ -481,7 +500,8 @@ def cambia_password(user_id):
     Permette all'utente autenticato di cambiare la propria password.
     Richiede la password attuale per conferma.
     """
-    if request.jwt_payload["sub"] != user_id:
+    # 'sub' nel token è una stringa: convertito a int per il confronto con user_id.
+    if int(request.jwt_payload["sub"]) != user_id:
         return jsonify({"error": "Non puoi modificare la password di un altro utente"}), 403
 
     data = request.get_json()
@@ -534,7 +554,8 @@ def cambia_password(user_id):
 @token_richiesto()
 def aggiorna_utente(user_id):
     """Aggiorna i dati anagrafici dell'utente (esclusa password)."""
-    if request.jwt_payload["sub"] != user_id:
+    # 'sub' nel token è una stringa: convertito a int per il confronto con user_id.
+    if int(request.jwt_payload["sub"]) != user_id:
         return jsonify({"error": "Non puoi modificare il profilo di un altro utente"}), 403
 
     data = request.get_json()
@@ -594,7 +615,8 @@ def profilo_automobilista(user_id):
     i dati del veicolo e della polizza associata.
     Accessibile solo dall'automobilista proprietario del profilo.
     """
-    if request.jwt_payload["sub"] != user_id:
+    # 'sub' nel token è una stringa: convertito a int per il confronto con user_id.
+    if int(request.jwt_payload["sub"]) != user_id:
         return jsonify({"error": "Non puoi accedere al profilo di un altro utente"}), 403
 
     conn = None
