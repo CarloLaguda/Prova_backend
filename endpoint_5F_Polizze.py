@@ -13,7 +13,6 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-# ── Configurazione MySQL ────────────────────────────────────────────────────
 MYSQL_CONFIG = {
     "host":     os.getenv("MYSQL_HOST"),
     "port":     int(os.getenv("MYSQL_PORT", 3306)),
@@ -26,12 +25,12 @@ MONGO_URI = os.getenv("MONGO_URI")
 
 try:
     mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-    mongo_db     = mongo_client['FakeClaim']
-    sinistri_col = mongo_db['Sinistri']
+    mongo_db     = mongo_client['safeclaim']
+    sinistri_col = mongo_db['Proto_Sinistro_SC']
     mongo_client.admin.command('ping')
-    print("✅ Connessione a MongoDB Atlas (FakeClaim) riuscita!")
+    print("Connessione a MongoDB Atlas (safeclaim) riuscita!")
 except Exception as e:
-    print(f"❌ Errore connessione MongoDB: {e}")
+    print(f"Errore connessione MongoDB: {e}")
 
 def get_mysql_connection():
     return mysql.connector.connect(**MYSQL_CONFIG)
@@ -50,7 +49,6 @@ def crea_polizza():
     if tipo_copertura not in TIPI_COPERTURA:
         return jsonify({"error": "tipo_copertura non valido"}), 400
 
-    # Riceve utente_id e lo usa per trovare l'assicuratore_id reale
     utente_id = data.get('utente_id')
     assicuratore_id = None
 
@@ -60,40 +58,30 @@ def crea_polizza():
         cursor = conn.cursor(dictionary=True)
 
         if utente_id:
-            cursor.execute(
-                "SELECT id FROM Assicuratore WHERE id_utente = %s", (utente_id,)
-            )
+            cursor.execute("SELECT id FROM Assicuratore WHERE id_utente = %s", (utente_id,))
             assicuratore = cursor.fetchone()
             if not assicuratore:
                 return jsonify({"error": f"Assicuratore con id_utente={utente_id} non trovato"}), 404
             assicuratore_id = assicuratore['id']
 
-        query = """
+        cursor.execute("""
             INSERT INTO Polizza (n_polizza, compagnia_assicurativa, data_inizio, data_scadenza,
                                  massimale, tipo_copertura, veicolo_id, assicuratore_id)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """
-        values = (
-            data['n_polizza'],
-            data.get('compagnia_assicurativa'),
-            data['data_inizio'],
-            data['data_scadenza'],
-            data.get('massimale'),
-            tipo_copertura,
-            data['veicolo_id'],
-            assicuratore_id
-        )
-        cursor.execute(query, values)
+        """, (
+            data['n_polizza'], data.get('compagnia_assicurativa'),
+            data['data_inizio'], data['data_scadenza'],
+            data.get('massimale'), tipo_copertura,
+            data['veicolo_id'], assicuratore_id
+        ))
         conn.commit()
         return jsonify({"message": "Polizza creata", "id": cursor.lastrowid}), 201
 
     except Exception as e:
-        if conn:
-            conn.rollback()
+        if conn: conn.rollback()
         return jsonify({"error": str(e)}), 400
     finally:
-        if conn:
-            conn.close()
+        if conn: conn.close()
 
 
 @app.route('/polizze', methods=['GET'])
@@ -109,6 +97,44 @@ def leggi_polizze():
     cursor.close()
     conn.close()
     return jsonify(risultati), 200
+
+
+@app.route('/polizze/utente/<int:user_id>', methods=['GET'])
+def get_polizze_utente(user_id):
+    conn = None
+    try:
+        conn = get_mysql_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT
+                p.id,
+                p.n_polizza,
+                p.compagnia_assicurativa,
+                p.data_inizio,
+                p.data_scadenza,
+                p.massimale,
+                p.tipo_copertura,
+                p.veicolo_id,
+                v.targa,
+                v.marca,
+                v.modello,
+                v.anno_immatricolazione
+            FROM Polizza p
+            JOIN Veicolo v       ON p.veicolo_id = v.id
+            JOIN Automobilista a ON v.automobilista_id = a.id
+            WHERE a.id_utente = %s
+            ORDER BY p.data_scadenza DESC
+        """, (user_id,))
+        polizze = cursor.fetchall()
+        for p in polizze:
+            for campo in ('data_inizio', 'data_scadenza'):
+                if p.get(campo) and hasattr(p[campo], 'isoformat'):
+                    p[campo] = p[campo].isoformat()
+        return jsonify(polizze), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if conn: conn.close()
 
 
 @app.route('/polizze/<int:id>', methods=['GET'])
@@ -138,19 +164,17 @@ def modifica_polizza(id):
 
     conn = get_mysql_connection()
     cursor = conn.cursor()
-    query = """
-        UPDATE Polizza
-        SET n_polizza=%s, compagnia_assicurativa=%s, data_inizio=%s,
-            data_scadenza=%s, massimale=%s, tipo_copertura=%s
-        WHERE id=%s
-    """
-    values = (
-        data.get('n_polizza'), data.get('compagnia_assicurativa'),
-        data.get('data_inizio'), data.get('data_scadenza'),
-        data.get('massimale'), data.get('tipo_copertura'), id,
-    )
     try:
-        cursor.execute(query, values)
+        cursor.execute("""
+            UPDATE Polizza
+            SET n_polizza=%s, compagnia_assicurativa=%s, data_inizio=%s,
+                data_scadenza=%s, massimale=%s, tipo_copertura=%s
+            WHERE id=%s
+        """, (
+            data.get('n_polizza'), data.get('compagnia_assicurativa'),
+            data.get('data_inizio'), data.get('data_scadenza'),
+            data.get('massimale'), data.get('tipo_copertura'), id,
+        ))
         conn.commit()
         if cursor.rowcount == 0:
             return jsonify({"error": "Polizza non trovata"}), 404

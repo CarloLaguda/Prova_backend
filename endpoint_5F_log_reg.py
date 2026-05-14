@@ -328,13 +328,9 @@ def registrazione():
 # ── Login ────────────────────────────────────────────────────────────────────
 @app.route("/login", methods=["POST"])
 def login():
-    """
-    Autentica l'utente con email + password.
-    Restituisce un access token (1 h) e un refresh token (30 gg).
-    """
     data     = request.get_json()
     email    = data.get("email")
-    password = data.get("password")       # password in chiaro dal client
+    password = data.get("password")
 
     if not email or not password:
         return jsonify({"error": "Email e password sono obbligatori"}), 400
@@ -354,10 +350,12 @@ def login():
                 u.telefono,
                 u.ruolo,
                 u.password_hash,
-                ass.nome AS nome_compagnia
+                ass.nome AS nome_compagnia,
+                aut.cf
             FROM Utente u
             LEFT JOIN Assicuratore a    ON u.id = a.id_utente
             LEFT JOIN Assicurazione ass ON a.assicurazione_id = ass.id
+            LEFT JOIN Automobilista aut ON u.id = aut.id_utente
             WHERE u.email = %s
             """,
             (email.strip().lower(),),
@@ -365,14 +363,11 @@ def login():
 
         user = cursor.fetchone()
         if not user:
-            # Stessa risposta per email inesistente o password errata (evita user enumeration)
             return jsonify({"error": "Credenziali non valide"}), 401
 
-        # Verifica password con bcrypt
         if not verifica_password(password, user["password_hash"]):
             return jsonify({"error": "Credenziali non valide"}), 401
 
-        # SE la password era in chiaro, la hashizziamo ora e aggiorniamo il DB
         if not user["password_hash"].startswith('$2'):
             nuovo_hash = hash_password(password)
             cursor.execute(
@@ -381,24 +376,21 @@ def login():
             )
             conn.commit()
 
-        # Normalizza ruolo
         if isinstance(user.get("ruolo"), set):
             user["ruolo"] = ",".join(user["ruolo"])
 
         user["nome_compagnia"] = user.get("nome_compagnia") or ""
 
-        # Genera coppia di token
         access_token  = genera_access_token(user["id"], user["ruolo"])
         refresh_token = genera_refresh_token(user["id"], user["ruolo"])
 
-        # Rimuove il campo hash dalla risposta (non inviare mai al client)
         user.pop("password_hash", None)
 
         return jsonify({
             "status":        "success",
             "access_token":  access_token,
             "refresh_token": refresh_token,
-            "expires_in":    JWT_ACCESS_HOURS * 3600,  # secondi
+            "expires_in":    JWT_ACCESS_HOURS * 3600,
             "user":          user,
         }), 200
 
@@ -409,7 +401,6 @@ def login():
     finally:
         if conn:
             conn.close()
-
 
 # ── Refresh access token ─────────────────────────────────────────────────────
 @app.route("/auth/refresh", methods=["POST"])
