@@ -2,18 +2,22 @@
 # SEZIONE IMPORTAZIONI LIBRERIE
 # ==========================================
 
+
 # LIBRERIE DATABASE
 import pymongo                             # Connessione a database NoSQL MongoDB
 import mysql.connector                     # MySQL/MariaDB - gestisce connessioni SQL
 from mysql.connector import Error          # Gestione eccezioni specifiche MySQL
 
+
 # LIBRERIE WEB E SERVER
 from flask import Flask, request, jsonify  # Flask server, gestione HTTP e JSON
 from flask_cors import CORS                # Abilita richieste cross-origin (frontend)
 
+
 # LIBRERIE PER DATA/TEMPO E OGGETTI
 from datetime import datetime              # Gestione timestamp
 from bson.objectid import ObjectId         # Gestione ID MongoDB
+
 
 # LIBRERIE PER GESTIONE EMAIL
 import smtplib                             # Protocollo per invio email
@@ -21,14 +25,23 @@ import urllib.parse                        # Codifica URL-safe per password
 from email.mime.text import MIMEText       # Corpo email HTML
 from email.mime.multipart import MIMEMultipart # Email multipart
 
+
 # LIBRERIE PER THREADING
 import threading                           # Esecuzione asincrona (non blocca il server)
+
 
 # ==========================================
 # SEZIONE 1: INIZIALIZZAZIONE
 # ==========================================
 app = Flask(__name__)
-CORS(app)
+
+
+# Configurazione CORS avanzata per sbloccare il Preflight di Angular
+CORS(app,
+     resources={r"/*": {"origins": "*"}},
+     allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+     methods=["GET", "POST", "OPTIONS"])
+
 
 # ==========================================
 # SEZIONE 2: CONFIGURAZIONE EMAIL SMTP
@@ -41,25 +54,25 @@ EMAIL_CONFIG = {
     "port": 465
 }
 
-# ==========================================
-# SEZIONE 3: CONFIGURAZIONE MONGODB
-# ==========================================
-import os
-from dotenv import load_dotenv
-load_dotenv()
 
-MONGO_URI = os.getenv("MONGO_URI")
+# ==========================================
+# SEZIONE 3: CONFIGURAZIONE MONGODB ATLAS
+# ==========================================
+_pw = urllib.parse.quote_plus("xxx123##")
+MONGO_URI = f"mongodb+srv://dbFakeClaim:{_pw}@cluster0.zgw1jft.mongodb.net/?appName=Cluster0"
+
 
 # ==========================================
 # SEZIONE 4: CONFIGURAZIONE MARIADB / MYSQL
 # ==========================================
 MYSQL_CONFIG = {
-    "host":     os.getenv("MYSQL_HOST"),
-    "port":     int(os.getenv("MYSQL_PORT", 3306)),
-    "user":     os.getenv("MYSQL_USER"),
-    "password": os.getenv("MYSQL_PASSWORD"),
-    "database": os.getenv("MYSQL_DATABASE"),
+    "host": "127.0.0.1",                  # Localhost per Codespaces
+    "user": "pythonuser",
+    "password": "password123",
+    "database": "gestione_assicurazioni",
+    "port": 3306
 }
+
 
 # ==========================================
 # SEZIONE 5: TEMPLATE EMAIL HTML
@@ -101,24 +114,27 @@ class SafeClaimTemplates:
     </html>
     """
 
+
 # ==========================================
 # SEZIONE 6: CONNESSIONE MONGODB
 # ==========================================
 try:
     mongo_client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-    db = mongo_client["safeclaim"]
-    sinistri_col = db['Proto_Sinistro_SC']
+    db = mongo_client["FakeClaim"]
+    sinistri_col = db['sinistri']
     mongo_client.server_info()
-    print("✅ MongoDB (safeclaim) Connesso!")
+    print("✅ MongoDB Atlas Connesso!")
 except Exception as e:
     print(f"❌ Errore MongoDB: {e}")
     sinistri_col = None
+
 
 # ==========================================
 # SEZIONE 7: HELPER MYSQL
 # ==========================================
 def get_mysql_conn():
     return mysql.connector.connect(**MYSQL_CONFIG)
+
 
 # ==========================================
 # SEZIONE 8: FUNZIONE INVIO EMAIL
@@ -130,7 +146,7 @@ def invia_mail_fisica(destinatario, oggetto, corpo_html):
         msg['To'] = destinatario
         msg['Subject'] = oggetto
         msg.attach(MIMEText(corpo_html, 'html'))
-        
+       
         with smtplib.SMTP_SSL(EMAIL_CONFIG["smtp_server"], EMAIL_CONFIG["port"]) as server:
             server.login(EMAIL_CONFIG["sender"], EMAIL_CONFIG["password"])
             server.sendmail(EMAIL_CONFIG["sender"], destinatario, msg.as_string())
@@ -138,6 +154,7 @@ def invia_mail_fisica(destinatario, oggetto, corpo_html):
     except Exception as e:
         print(f"❌ SMTP Error: {e}")
         return False
+
 
 # ==========================================
 # SEZIONE 9: THREAD NOTIFICHE
@@ -147,6 +164,7 @@ def gestisci_notifiche_sinistro(sinistro_id, data):
     try:
         conn = get_mysql_conn()
         cursor = conn.cursor(dictionary=True)
+
 
         # Email Utente
         cursor.execute("SELECT nome, email FROM Automobilista WHERE id = %s", (data['automobilista_id'],))
@@ -159,6 +177,7 @@ def gestisci_notifiche_sinistro(sinistro_id, data):
             invia_mail_fisica(user['email'], SafeClaimTemplates.NEW_CLAIM_SUBJECT, html_u)
             print(f"📧 Mail inviata all'utente: {user['email']}")
 
+
         # Email Assicuratori
         cursor.execute("SELECT email FROM Assicuratore")
         for ass in cursor.fetchall():
@@ -169,22 +188,25 @@ def gestisci_notifiche_sinistro(sinistro_id, data):
                 invia_mail_fisica(ass['email'], SafeClaimTemplates.ADMIN_NOTIFY_SUBJECT, html_a)
                 print(f"📧 Notifica inviata all'assicuratore: {ass['email']}")
 
+
     except Exception as e:
         print(f"❌ Errore Database/Notifiche: {e}")
     finally:
         if conn and conn.is_connected():
             conn.close()
 
+
 # ==========================================
 # SEZIONE 10: ENDPOINTS FLASK
 # ==========================================
+
 
 # 1. Endpoint Creazione Sinistro (Automatico)
 @app.route('/sinistro', methods=['POST'])
 def crea_sinistro():
     if sinistri_col is None: # Corretto per evitare NotImplementedError
         return jsonify({"error": "Database MongoDB non connesso"}), 500
-    
+   
     data = request.json
     try:
         nuovo_doc = {
@@ -198,8 +220,10 @@ def crea_sinistro():
         res = sinistri_col.insert_one(nuovo_doc)
         s_id = str(res.inserted_id)
 
+
         # Avvio notifiche in background
         threading.Thread(target=gestisci_notifiche_sinistro, args=(s_id, data)).start()
+
 
         return jsonify({
             "status": "success",
@@ -209,21 +233,29 @@ def crea_sinistro():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
 # 2. Endpoint Invio Email Manuale (Richiesto)
 @app.route('/invia-email', methods=['POST'])
 def rotta_invia_email_manuale():
+    # Gestione esplicita del Preflight (per sicurezza extra)
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "ok"}), 200
+
+
     data = request.json
     if not data or 'destinatario' not in data or 'oggetto' not in data or 'messaggio' not in data:
         return jsonify({"status": "error", "message": "Campi mancanti"}), 400
 
+
     try:
         threading.Thread(
-            target=invia_mail_fisica, 
+            target=invia_mail_fisica,
             args=(data['destinatario'], data['oggetto'], data['messaggio'])
         ).start()
         return jsonify({"status": "success", "message": f"Invio avviato verso {data['destinatario']}"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 # ==========================================
 # SEZIONE 11: AVVIO
