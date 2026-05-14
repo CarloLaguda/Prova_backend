@@ -29,15 +29,15 @@ MYSQL_CONFIG = {
     "database": os.getenv("MYSQL_DATABASE"),
 }
 
-# MongoDB — nuovo server (db.giobra.com)
+# MongoDB
 MONGO_URI = os.getenv("MONGO_URI")
 
 try:
     mongo_client   = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     mongo_db       = mongo_client["safeclaim"]
-    col_interventi = mongo_db["Proto_Intervento_SC"]   # ex Pratica
-    col_documenti  = mongo_db["Proto_Documenti_SC"]    # ex Perizia
-    col_sinistri   = mongo_db["Proto_Sinistro_SC"]     # ex Sinistri
+    col_interventi = mongo_db["Proto_Intervento_SC"]   # Pratiche/Interventi
+    col_documenti  = mongo_db["Proto_Documenti_SC"]    # Documenti/Perizie legacy
+    col_sinistri   = mongo_db["Proto_Sinistro_SC"]     # Sinistri
     mongo_client.admin.command('ping')
     print("✅ Connessione a MongoDB (safeclaim) riuscita!")
 except Exception as e:
@@ -68,7 +68,6 @@ def resolve_perito_id(id_utente):
 def _serializza_sinistro_embed(sinistro: dict) -> dict:
     """Serializza sinistro con alias retrocompatibilità per il frontend."""
     sinistro['_id'] = str(sinistro['_id'])
-    # Alias nuovi campi → vecchi nomi usati dal frontend
     if 'data_sinistro' in sinistro:
         if isinstance(sinistro['data_sinistro'], datetime):
             sinistro['data_sinistro'] = sinistro['data_sinistro'].isoformat()
@@ -80,6 +79,27 @@ def _serializza_sinistro_embed(sinistro: dict) -> dict:
     if 'stato_sinistro' in sinistro:
         sinistro['stato'] = sinistro['stato_sinistro']
     return sinistro
+
+
+def _serializza_intervento(d: dict) -> dict:
+    """Serializza un documento col_interventi per il frontend."""
+    d['_id'] = str(d['_id'])
+    if 'sinistro_id' in d and d['sinistro_id'] is not None:
+        d['sinistro_id'] = str(d['sinistro_id'])
+    for key in ['data_inserimento', 'data_aggiornamento', 'data_inizio', 'data_fine']:
+        if key in d and isinstance(d[key], datetime):
+            d[key] = d[key].isoformat()
+    # Retrocompatibilità: tipo_intervento → tipo_danno
+    if 'tipo_intervento' in d:
+        d['tipo_danno'] = d.get('tipo_intervento', d.get('tipo_danno'))
+    # Retrocompatibilità: descrizione_lavori → descrizione
+    if 'descrizione_lavori' in d and 'descrizione' not in d:
+        d['descrizione'] = d['descrizione_lavori']
+    # parti_danneggiate da ricambi_utilizzati se non presenti
+    if 'parti_danneggiate' not in d and 'ricambi_utilizzati' in d:
+        d['parti_danneggiate'] = [r.get('nome', r) if isinstance(r, dict) else r
+                                  for r in d.get('ricambi_utilizzati', [])]
+    return d
 
 
 # ── GET pratica/intervento ─────────────────────────────────────────────────────
@@ -126,7 +146,11 @@ def get_pratiche_assicurazione():
 def get_pratiche_perito(perito_id):
     try:
         real_perito_id = resolve_perito_id(perito_id)
-        pratiche = list(col_interventi.find({"perito_id": real_perito_id}))
+        # Esclude i documenti di tipo 'relazione' che vengono gestiti da /perizie
+        pratiche = list(col_interventi.find({
+            "perito_id": real_perito_id,
+            "tipo_documento": {"$ne": "relazione"}
+        }))
         result = []
         for p in pratiche:
             p['_id'] = str(p['_id'])
@@ -171,7 +195,7 @@ def get_pratiche_perito(perito_id):
         return jsonify({"error": str(e)}), 500
 
 
-# ── POST crea pratica/intervento (con o senza perito) ─────────────────────────
+# ── POST crea pratica/intervento (senza perito nell'URL) ─────────────────────
 
 @app.route('/sinistro/<id_sinistro>/pratica', methods=['POST'])
 def crea_pratica(id_sinistro):
@@ -193,8 +217,7 @@ def crea_pratica(id_sinistro):
 
     stato = "assegnata" if perito_id else "da_assegnare"
 
-    # Mappa i vecchi campi ai nuovi nomi di Proto_Intervento_SC
-    tipo_intervento   = data.get("tipo_intervento") or data.get("tipo_danno")
+    tipo_intervento    = data.get("tipo_intervento") or data.get("tipo_danno")
     descrizione_lavori = data.get("descrizione_lavori") or data.get("descrizione", "")
     note_tecnico       = data.get("note_tecnico") or data.get("note_tecniche")
     ricambi            = data.get("ricambi_utilizzati") or [
@@ -216,7 +239,6 @@ def crea_pratica(id_sinistro):
         "foto_dopo":          data.get("foto_dopo", []),
         "data_inizio":        data.get("data_inizio"),
         "data_fine":          None,
-        # Campi legacy mantenuti per retrocompatibilità
         "titolo":             data.get("titolo", "Intervento in attesa di assegnazione"),
         "stima_danno":        data.get("stima_danno"),
         "conclusione":        data.get("conclusione"),
@@ -249,6 +271,63 @@ def crea_pratica(id_sinistro):
         "status":     "Pratica creata",
         "id_pratica": pratica_id,
         "stato":      stato
+    }), 201
+
+
+# ── POST crea relazione peritale (perito nell'URL) ────────────────────────────
+# FIX: questa rotta mancava e causava 404 ogni volta che il frontend
+# tentava di salvare una nuova relazione peritale.
+
+@app.route('/sinistro/<sinistro_id>/perito/<perito_id>/pratica', methods=['POST'])
+def crea_relazione_perito(sinistro_id, perito_id):
+    data = request.get_json() or {}
+    real_perito_id = resolve_perito_id(perito_id)
+
+    tipo_intervento    = data.get("tipo_intervento") or data.get("tipo_danno")
+    descrizione_lavori = data.get("descrizione_lavori") or data.get("descrizione", "")
+    ricambi            = data.get("ricambi_utilizzati") or [
+        {"nome": p} for p in data.get("parti_danneggiate", [])
+    ]
+
+    relazione_doc = {
+        "sinistro_id":        sinistro_id,
+        "perito_id":          real_perito_id,
+        "titolo":             data.get("titolo", ""),
+        "tipo_intervento":    tipo_intervento,
+        "tipo_danno":         tipo_intervento,           # alias legacy
+        "stima_danno":        data.get("stima_danno"),
+        "ricambi_utilizzati": ricambi,
+        "parti_danneggiate":  data.get("parti_danneggiate", []),
+        "descrizione_lavori": descrizione_lavori,
+        "descrizione":        descrizione_lavori,        # alias legacy
+        "conclusione":        data.get("conclusione"),
+        "veicolo_targa":      data.get("veicolo_targa", data.get("veicolo", "")),
+        "veicolo":            data.get("veicolo_targa", data.get("veicolo", "")),
+        "claim_code":         data.get("claim_code"),
+        "stato":              data.get("stato", "Bozza"),
+        # flag per distinguere le relazioni peritali dalle pratiche operative
+        "tipo_documento":     "relazione",
+        "data_inserimento":   datetime.utcnow(),
+    }
+
+    result = col_interventi.insert_one(relazione_doc)
+    perizia_id = str(result.inserted_id)
+
+    # Aggiorna lo stato del sinistro a in_perizia se era assegnato
+    try:
+        col_sinistri.update_one(
+            {"_id": ObjectId(sinistro_id), "stato_sinistro": {"$in": ["assegnato", "assegnata", "aperto"]}},
+            {"$set": {
+                "stato_sinistro":     "in_perizia",
+                "data_aggiornamento": datetime.utcnow()
+            }}
+        )
+    except Exception as e:
+        print(f"[crea_relazione_perito] Errore aggiornamento sinistro: {e}")
+
+    return jsonify({
+        "status":     "ok",
+        "id_perizia": perizia_id
     }), 201
 
 
@@ -381,6 +460,7 @@ def elimina_pratica(pratica_id, perito_id):
             "perito_id": real_perito_id
         })
         if result.deleted_count == 0:
+            # Fallback: prova senza filtro perito_id
             result = col_interventi.delete_one({"_id": ObjectId(pratica_id)})
         if result.deleted_count == 0:
             return jsonify({"error": "Pratica non trovata"}), 404
@@ -406,21 +486,35 @@ def update_pratica(sinistro_id, perito_id):
         {"nome": p} for p in data.get("parti_danneggiate", [])
     ]
 
-    query       = {"sinistro_id": sinistro_id, "perito_id": real_perito_id}
+    # Se è una relazione (ha tipo_documento=relazione o claim_code), usa lo stesso flag
+    tipo_documento = data.get("tipo_documento", "relazione")
+
+    # Cerca prima per sinistro_id + perito_id + tipo_documento=relazione
+    query = {
+        "sinistro_id":    sinistro_id,
+        "perito_id":      real_perito_id,
+        "tipo_documento": "relazione"
+    }
+
     update_data = {
         "$set": {
             "titolo":             data.get("titolo"),
             "tipo_intervento":    tipo_intervento,
+            "tipo_danno":         tipo_intervento,
             "stima_danno":        data.get("stima_danno"),
             "ricambi_utilizzati": ricambi,
+            "parti_danneggiate":  data.get("parti_danneggiate", []),
             "descrizione_lavori": descrizione_lavori,
+            "descrizione":        descrizione_lavori,
             "conclusione":        data.get("conclusione"),
             "veicolo_targa":      data.get("veicolo_targa", data.get("veicolo")),
+            "veicolo":            data.get("veicolo_targa", data.get("veicolo")),
             "claim_code":         data.get("claim_code"),
             "stato":              data.get("stato", "Bozza"),
             "note_tecnico":       note_tecnico,
             "sinistro_id":        sinistro_id,
             "perito_id":          real_perito_id,
+            "tipo_documento":     tipo_documento,
             "data_aggiornamento": datetime.utcnow()
         }
     }
@@ -440,7 +534,6 @@ def registra_rimborso(id_sinistro, id_perito, id_perizia):
     except Exception:
         return jsonify({"error": "Formato ID perizia non valido"}), 400
 
-    # Aggiorna il documento in Proto_Documenti_SC
     res = col_documenti.update_one(
         {"_id": p_id},
         {"$set": {
@@ -453,7 +546,6 @@ def registra_rimborso(id_sinistro, id_perito, id_perizia):
     if res.matched_count == 0:
         return jsonify({"error": "Documento non trovato"}), 404
 
-    # Aggiorna il preventivo nel sinistro
     try:
         col_sinistri.update_one(
             {"_id": ObjectId(id_sinistro)},
@@ -513,33 +605,52 @@ def assegna_intervento(id_sinistro, id_perito, id_perizia):
     return jsonify({"status": "Successo", "nuovo_stato": "in_riparazione"}), 200
 
 
-# ── GET perizie perito ────────────────────────────────────────────────────────
+# ── GET perizie/relazioni perito ──────────────────────────────────────────────
+# FIX: precedentemente leggeva da col_documenti (Proto_Documenti_SC) ma le
+# relazioni create dal frontend vengono salvate in col_interventi con il flag
+# tipo_documento='relazione'. Ora legge dalla collection corretta.
 
 @app.route('/perito/<id_utente>/perizie', methods=['GET'])
 def get_perizie_perito(id_utente):
     try:
         real_perito_id = resolve_perito_id(id_utente)
-        docs = list(col_documenti.find({"perito_id": real_perito_id}))
 
-        for d in docs:
-            d['_id'] = str(d['_id'])
-            if 'sinistro_id' in d and isinstance(d['sinistro_id'], ObjectId):
-                d['sinistro_id'] = str(d['sinistro_id'])
-            for key in ['data_inserimento', 'data_aggiornamento']:
-                if key in d and isinstance(d[key], datetime):
-                    d[key] = d[key].isoformat()
+        # Legge da col_interventi filtrando per tipo_documento='relazione'
+        docs = list(col_interventi.find({
+            "perito_id":      real_perito_id,
+            "tipo_documento": "relazione"
+        }))
 
-        return jsonify(docs), 200
+        # Fallback: se non ci sono relazioni con il flag (dati pre-fix), cerca
+        # quelli con titolo e claim_code valorizzati (formato legacy)
+        if not docs:
+            docs = list(col_interventi.find({
+                "perito_id": real_perito_id,
+                "titolo":    {"$exists": True, "$ne": ""},
+                "claim_code": {"$exists": True, "$ne": None}
+            }))
+
+        result = [_serializza_intervento(d) for d in docs]
+        return jsonify(result), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
 # ── DELETE perizia/documento ──────────────────────────────────────────────────
+# FIX: precedentemente eliminava solo da col_documenti. Ora controlla prima
+# col_interventi (dove il frontend salva le relazioni) e poi col_documenti
+# come fallback per dati legacy.
 
 @app.route('/perizia/<perizia_id>', methods=['DELETE'])
 def elimina_perizia(perizia_id):
+    if not ObjectId.is_valid(perizia_id):
+        return jsonify({"error": "ID perizia non valido"}), 400
     try:
-        result = col_documenti.delete_one({"_id": ObjectId(perizia_id)})
+        # Prova prima in col_interventi (dove il frontend salva le relazioni)
+        result = col_interventi.delete_one({"_id": ObjectId(perizia_id)})
+        if result.deleted_count == 0:
+            # Fallback: prova in col_documenti (dati legacy)
+            result = col_documenti.delete_one({"_id": ObjectId(perizia_id)})
         if result.deleted_count == 0:
             return jsonify({"error": "Documento non trovato"}), 404
         return jsonify({"status": "eliminata"}), 200
