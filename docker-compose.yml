@@ -1,0 +1,150 @@
+version: "3.9"
+
+networks:
+  safeclaim-net:
+    driver: bridge
+
+x-common-env: &common-env
+  MYSQL_HOST:        ${MYSQL_HOST}
+  MYSQL_PORT:        ${MYSQL_PORT}
+  MYSQL_USER:        ${MYSQL_USER}
+  MYSQL_PASSWORD:    ${MYSQL_PASSWORD}
+  MYSQL_DATABASE:    ${MYSQL_DATABASE}
+  MONGO_URI:         ${MONGO_URI}
+
+services:
+
+  nginx:
+    image: nginx:alpine
+    container_name: safeclaim-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - safeclaim-net
+    restart: unless-stopped
+    depends_on:
+      - assicurazione
+      - log-reg
+      - sinistri
+      - periti
+      - polizze
+      - veicoli
+      - mail
+      - rag
+
+  frontend:
+    build:
+      context: ../Frontend-5F        # percorso relativo alla cartella frontend
+    container_name: safeclaim-frontend
+    ports:
+      - "4200:80"
+    networks:
+      - safeclaim-net
+    restart: unless-stopped
+    depends_on:
+      - log-reg
+      - sinistri
+      - periti
+      - polizze
+      - veicoli
+      - mail
+      - rag
+      - assicurazione
+
+  assicurazione:
+    build:
+      context: ./assicurazione
+    container_name: safeclaim-assicurazione
+    env_file: .env
+    environment:
+      <<: *common-env
+    networks:
+      - safeclaim-net
+    restart: unless-stopped
+
+  log-reg:
+    build:
+      context: ./log_reg
+    container_name: safeclaim-log-reg
+    env_file: .env
+    environment:
+      <<: *common-env
+    networks:
+      - safeclaim-net
+    restart: unless-stopped
+
+  sinistri:
+    build:
+      context: ./sinistri
+    container_name: safeclaim-sinistri
+    env_file: .env
+    environment:
+      <<: *common-env
+      GEMINI_API_KEY:          ${GEMINI_API_KEY}
+      GEMINI_MODEL:            ${GEMINI_MODEL}
+      CLOUDINARY_CLOUD_NAME:   ${CLOUDINARY_CLOUD_NAME}
+      CLOUDINARY_API_KEY:      ${CLOUDINARY_API_KEY}
+      CLOUDINARY_API_SECRET:   ${CLOUDINARY_API_SECRET}
+    networks:
+      - safeclaim-net
+    restart: unless-stopped
+
+  periti:
+    build:
+      context: ./periti
+    container_name: safeclaim-periti
+    env_file: .env
+    environment:
+      <<: *common-env
+    networks:
+      - safeclaim-net
+    restart: unless-stopped
+
+  polizze:
+    build:
+      context: ./polizze
+    container_name: safeclaim-polizze
+    env_file: .env
+    environment:
+      <<: *common-env
+    networks:
+      - safeclaim-net
+    restart: unless-stopped
+
+  veicoli:
+    build:
+      context: ./veicoli
+    container_name: safeclaim-veicoli
+    env_file: .env
+    environment:
+      <<: *common-env
+    networks:
+      - safeclaim-net
+    restart: unless-stopped
+
+  mail:
+    build:
+      context: ./mail
+    container_name: safeclaim-mail
+    env_file: .env
+    environment:
+      <<: *common-env
+      EMAIL_SENDER:   ${EMAIL_SENDER}
+      EMAIL_PASSWORD: ${EMAIL_PASSWORD}
+    networks:
+      - safeclaim-net
+    restart: unless-stopped
+
+  rag:
+    build:
+      context: ./rag
+    container_name: safeclaim-rag
+    env_file: .env
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GEMINI_MODEL:   ${GEMINI_MODEL}
+    networks:
+      - safeclaim-net
+    restart: unless-stopped
