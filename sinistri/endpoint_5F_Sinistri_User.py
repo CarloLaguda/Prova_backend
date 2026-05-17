@@ -8,7 +8,9 @@ Collezioni MongoDB (nuovo server):
   Proto_Sinistro_SC   — sinistri
   Proto_Intervento_SC — interventi/pratiche
   Proto_Documenti_SC  — documenti/perizie
-  Soccorso            — richieste soccorso (mirror di MySQL)
+
+Le richieste di soccorso vengono salvate ESCLUSIVAMENTE su MySQL
+(tabella Richiesta_Soccorso) — non esiste più la collezione MongoDB "Soccorso".
 """
 
 from flask import Flask, request, jsonify, make_response
@@ -40,12 +42,6 @@ except Exception as _e:
 
 app = Flask(__name__)
 
-# ─────────────────────────────────────────────
-#  CORS — configurazione esplicita per Codespaces
-#  flask-cors gestisce il preflight OPTIONS e
-#  aggiunge gli header su ogni risposta.
-# ─────────────────────────────────────────────
-
 CORS(
     app,
     resources={r"/*": {"origins": "*"}},
@@ -56,8 +52,6 @@ CORS(
 )
 
 
-# Fallback: intercetta ogni OPTIONS e restituisce 200 anche se flask-cors
-# non lo cattura (può succedere su alcuni reverse-proxy di Codespaces).
 @app.before_request
 def handle_preflight():
     if request.method == "OPTIONS":
@@ -69,7 +63,6 @@ def handle_preflight():
         return resp
 
 
-# Aggiunge gli header CORS su ogni risposta (doppio livello di sicurezza).
 @app.after_request
 def add_cors_headers(response):
     response.headers["Access-Control-Allow-Origin"]  = "*"
@@ -98,13 +91,12 @@ def get_mysql():
         raise
 
 # ─────────────────────────────────────────────
-#  CONFIGURAZIONE MONGODB — nuovo server
+#  CONFIGURAZIONE MONGODB
 # ─────────────────────────────────────────────
 
-col_interventi = None   # Proto_Intervento_SC  (ex Pratica)
-col_documenti  = None   # Proto_Documenti_SC    (ex Perizia)
-col_sinistri   = None   # Proto_Sinistro_SC     (ex Sinistri)
-soccorso_col   = None   # Soccorso
+col_interventi = None
+col_documenti  = None
+col_sinistri   = None
 _MONGO_DISPONIBILE = False
 
 try:
@@ -114,7 +106,6 @@ try:
     col_interventi = mongo_db["Proto_Intervento_SC"]
     col_documenti  = mongo_db["Proto_Documenti_SC"]
     col_sinistri   = mongo_db["Proto_Sinistro_SC"]
-    soccorso_col   = mongo_db["Soccorso"]
     mongo_client.admin.command("ping")
     _MONGO_DISPONIBILE = True
     print("✅ Connessione a MongoDB (safeclaim) riuscita!")
@@ -159,7 +150,6 @@ def _richiedi_mongo():
 
 
 def _serializza_sinistro(s: dict) -> dict:
-    """Serializza un documento Proto_Sinistro_SC aggiungendo alias per compatibilità frontend."""
     s["_id"] = str(s["_id"])
     if "data_sinistro" in s:
         if isinstance(s["data_sinistro"], datetime):
@@ -529,7 +519,7 @@ def get_analisi_ai(sinistro_id):
         return jsonify({"error": str(e)}), 500
 
 # ─────────────────────────────────────────────
-#  ROTTE — SOCCORSO
+#  ROTTE — SOCCORSO (solo MySQL)
 # ─────────────────────────────────────────────
 
 @app.route("/soccorso", methods=["POST"])
@@ -555,7 +545,6 @@ def crea_richiesta_soccorso():
         conn   = get_mysql()
         cursor = conn.cursor(dictionary=True)
 
-        # 1. Recuperiamo i dati del veicolo e dell'automobilista tramite la targa
         cursor.execute("""
             SELECT v.id AS veicolo_id, a.id AS automobilista_id
             FROM Veicolo v
@@ -569,10 +558,6 @@ def crea_richiesta_soccorso():
 
         now_utc = datetime.now(timezone.utc)
 
-        # 2. INSERIMENTO SU MYSQL
-        # IMPORTANTE: id_veicolo_soccorso è impostato a None (NULL) perché al momento della 
-        # richiesta il carroattrezzi non è ancora stato assegnato. Passare l'ID del veicolo
-        # privato qui causava l'errore 1452 di integrità referenziale.
         cursor.execute("""
             INSERT INTO Richiesta_Soccorso
             (id_sinistro, id_automobilista, id_officina, id_veicolo_soccorso,
@@ -582,7 +567,7 @@ def crea_richiesta_soccorso():
             id_sinistro,
             veicolo["automobilista_id"],
             id_officina,
-            None,  # Risolto: rimosso veicolo["veicolo_id"] che causava il crash
+            None,
             now_utc,
             orario_arrivo,
             durata_soccorso,
@@ -592,37 +577,15 @@ def crea_richiesta_soccorso():
         richiesta_id = cursor.lastrowid
         conn.commit()
 
-        # Gestione posizione per MongoDB
         posizione = None
         if lat is not None and lon is not None:
             posizione = {"tipo": "gps", "lat": lat, "lon": lon}
         elif via:
             posizione = {"tipo": "indirizzo", "via": via}
 
-        # 3. INSERIMENTO SU MONGODB
-        # Qui manteniamo l'ID del veicolo dell'utente (veicolo["veicolo_id"]) perché 
-        # è utile per lo storico e non ha vincoli di foreign key.
-        mongo_id = None
-        if _MONGO_DISPONIBILE and soccorso_col is not None:
-            res = soccorso_col.insert_one({
-                "richiesta_mysql_id": richiesta_id,
-                "id_sinistro":        id_sinistro,
-                "id_automobilista":   veicolo["automobilista_id"],
-                "id_officina":        id_officina,
-                "id_veicolo_utente":  veicolo["veicolo_id"], # Chiave rinominata per chiarezza
-                "targa":              targa,
-                "posizione":          posizione,
-                "orario_arrivo":      orario_arrivo,
-                "durata_soccorso":    durata_soccorso,
-                "stato":              "in_attesa",
-                "data_richiesta":     now_utc,
-            })
-            mongo_id = str(res.inserted_id)
-
         return jsonify({
             "success":          True,
             "richiesta_id":     richiesta_id,
-            "mongo_id":         mongo_id,
             "id_sinistro":      id_sinistro,
             "id_automobilista": veicolo["automobilista_id"],
             "id_officina":      id_officina,
@@ -642,6 +605,7 @@ def crea_richiesta_soccorso():
     finally:
         if conn:
             conn.close()
+
 
 @app.route("/soccorso/utente/<int:automobilista_id>", methods=["GET"])
 def get_soccorsi_utente(automobilista_id):
