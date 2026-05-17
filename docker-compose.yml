@@ -36,7 +36,7 @@ services:
 
   frontend:
     build:
-      context: ../Frontend-5F        # percorso relativo alla cartella frontend
+      context: ../frontend/Frontend-5F        # percorso relativo alla cartella frontend
     container_name: safeclaim-frontend
     ports:
       - "4200:80"
