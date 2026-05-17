@@ -9,7 +9,9 @@ RUN pip install --no-cache-dir \
     numpy \
     google-genai \
     requests \
-    python-dotenv
+    python-dotenv \
+    pymongo[srv] \
+    dnspython
 
 COPY endpoint_5F_RAG_Assistente.py .
 
