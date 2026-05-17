@@ -4,7 +4,7 @@
 
 
 # LIBRERIE DATABASE
-import pymongo                             # Connessione a database NoSQL MongoDB
+import uuid
 import mysql.connector                     # MySQL/MariaDB - gestisce connessioni SQL
 from mysql.connector import Error          # Gestione eccezioni specifiche MySQL
 
@@ -16,12 +16,10 @@ from flask_cors import CORS                # Abilita richieste cross-origin (fro
 
 # LIBRERIE PER DATA/TEMPO E OGGETTI
 from datetime import datetime              # Gestione timestamp
-from bson.objectid import ObjectId         # Gestione ID MongoDB
 
 
 # LIBRERIE PER GESTIONE EMAIL
 import smtplib                             # Protocollo per invio email
-import urllib.parse                        # Codifica URL-safe per password
 from email.mime.text import MIMEText       # Corpo email HTML
 from email.mime.multipart import MIMEMultipart # Email multipart
 
@@ -53,13 +51,6 @@ EMAIL_CONFIG = {
     "smtp_server": "smtp.gmail.com",
     "port": 465
 }
-
-
-# ==========================================
-# SEZIONE 3: CONFIGURAZIONE MONGODB ATLAS
-# ==========================================
-_pw = urllib.parse.quote_plus("xxx123##")
-MONGO_URI = f"mongodb+srv://dbFakeClaim:{_pw}@cluster0.zgw1jft.mongodb.net/?appName=Cluster0"
 
 
 # ==========================================
@@ -106,7 +97,7 @@ class SafeClaimTemplates:
             </div>
             <div style="padding: 20px;">
                 <h2>Nuova Pratica Ricevuta</h2>
-                <p><strong>ID Mongo:</strong> {claim_id}<br><strong>Targa:</strong> {targa}</p>
+                <p><strong>ID Pratica:</strong> {claim_id}<br><strong>Targa:</strong> {targa}</p>
                 <p><strong>Descrizione:</strong> {descrizione}</p>
             </div>
         </div>
@@ -115,18 +106,7 @@ class SafeClaimTemplates:
     """
 
 
-# ==========================================
-# SEZIONE 6: CONNESSIONE MONGODB
-# ==========================================
-try:
-    mongo_client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-    db = mongo_client["FakeClaim"]
-    sinistri_col = db['sinistri']
-    mongo_client.server_info()
-    print("✅ MongoDB Atlas Connesso!")
-except Exception as e:
-    print(f"❌ Errore MongoDB: {e}")
-    sinistri_col = None
+# MongoDB rimosso: non salviamo più i sinistri su MongoDB in questo servizio
 
 
 # ==========================================
@@ -204,31 +184,18 @@ def gestisci_notifiche_sinistro(sinistro_id, data):
 # 1. Endpoint Creazione Sinistro (Automatico)
 @app.route('/sinistro', methods=['POST'])
 def crea_sinistro():
-    if sinistri_col is None: # Corretto per evitare NotImplementedError
-        return jsonify({"error": "Database MongoDB non connesso"}), 500
-   
     data = request.json
     try:
-        nuovo_doc = {
-            "automobilista_id": data['automobilista_id'],
-            "targa": data['targa'],
-            "data_evento": data['data_evento'],
-            "descrizione": data['descrizione'],
-            "stato": "APERTO",
-            "data_inserimento": datetime.now()
-        }
-        res = sinistri_col.insert_one(nuovo_doc)
-        s_id = str(res.inserted_id)
-
+        # Non salviamo più il sinistro su MongoDB: generiamo un id pratica e avviamo le notifiche
+        s_id = uuid.uuid4().hex
 
         # Avvio notifiche in background
         threading.Thread(target=gestisci_notifiche_sinistro, args=(s_id, data)).start()
 
-
         return jsonify({
             "status": "success",
-            "id_mongo": s_id,
-            "message": "Sinistro registrato e notifiche avviate"
+            "id_pratica": s_id,
+            "message": "Sinistro elaborato (non salvato su MongoDB) e notifiche avviate"
         }), 201
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
