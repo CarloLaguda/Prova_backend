@@ -13,29 +13,44 @@ CORS(app)
 # ── Configurazione MySQL ────────────────────────────────────────────────────
 load_dotenv()
 
+load_dotenv()
 MYSQL_CONFIG = {
-    "host":     "db.giobra.com",
-    "port":     3306,
-    "user":     "user",
-    "password": "xxx123##",
-    "database": "Prototipo_SafeClaim",
+    "host":     os.getenv("MYSQL_HOST"),
+    "port":     int(os.getenv("MYSQL_PORT", 3306)),
+    "user":     os.getenv("MYSQL_USER"),
+    "password": os.getenv("MYSQL_PASSWORD"),
+    "database": os.getenv("MYSQL_DATABASE"),
 }
 
 def get_db_connection():
-    return mysql.connector.connect(**MYSQL_CONFIG)
+    try:
+        return mysql.connector.connect(**MYSQL_CONFIG)
+    except Exception as e:
+        print(f"❌ Errore connessione MySQL: {e}")
+        raise
 
-MONGO_URI = "mongodb+srv://dbFakeClaim:xxx123%23%23@cluster0.zgw1jft.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+# ─────────────────────────────────────────────
+#  CONFIGURAZIONE MONGODB — nuovo server
+# ─────────────────────────────────────────────
+
+col_interventi = None   # Proto_Intervento_SC  (ex Pratica)
+col_documenti  = None   # Proto_Documenti_SC    (ex Perizia)
+col_sinistri   = None   # Proto_Sinistro_SC     (ex Sinistri)
+_MONGO_DISPONIBILE = False
 
 try:
-    mongo_client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-    mongo_db     = mongo_client["FakeClaim"]
-    sinistri_col = mongo_db["Sinistri"]
-    soccorso_col = mongo_db["Soccorso"]
-    mongo_client.admin.command('ping')
-    print("✅ Connessione a MongoDB Atlas riuscita!")
+    MONGO_URI    = os.getenv("MONGO_URI")
+    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    mongo_db     = mongo_client["safeclaim"]
+    col_interventi = mongo_db["Proto_Intervento_SC"]
+    col_documenti  = mongo_db["Proto_Documenti_SC"]
+    col_sinistri   = mongo_db["Proto_Sinistro_SC"]
+    mongo_client.admin.command("ping")
+    _MONGO_DISPONIBILE = True
+    print("✅ Connessione a MongoDB (safeclaim) riuscita!")
 except Exception as e:
-    print(f"❌ Errore connessione MongoDB: {e}")
-
+    print(f"❌ Errore connessione MongoDB: {e} — le rotte MongoDB risponderanno con 503.")
+# ── Veicoli ──────────────────────────────────────────────────────────────────
 # ── Veicoli ──────────────────────────────────────────────────────────────────
 
 @app.route('/veicoli', methods=['GET'])
@@ -70,7 +85,7 @@ def get_veicoli_utente(user_id):
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
         query = """
-            SELECT v.id, v.targa, v.marca, v.modello, v.anno_immatricolazione,
+            SELECT v.id, v.targa, v.n_telaio, v.marca, v.modello, v.anno_immatricolazione,
                    a.nome AS nome_proprietario, a.cognome AS cognome_proprietario
             FROM Veicolo v
             JOIN Automobilista a ON v.automobilista_id = a.id
@@ -83,6 +98,7 @@ def get_veicoli_utente(user_id):
     finally:
         if conn:
             conn.close()
+
 
 @app.route('/veicolo/user/<int:user_id>', methods=['POST'])
 def crea_veicolo_utente(user_id):
